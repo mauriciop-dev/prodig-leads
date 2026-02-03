@@ -27,12 +27,22 @@ export default function Dashboard() {
     }, []);
 
     const addLead = async () => {
-        if (!newUrl) return;
-        const { error } = await supabase.from('leads').insert({
+        console.log('Attempting to add lead:', newUrl);
+        if (!newUrl) {
+            console.warn('Add Lead: URL is empty');
+            return;
+        }
+        
+        const { data, error } = await supabase.from('leads').insert({
             url: newUrl,
             status: 'new'
-        });
-        if (!error) {
+        }).select();
+
+        if (error) {
+            console.error('Supabase error adding lead:', error);
+            alert(`Error adding lead: ${error.message}`);
+        } else {
+            console.log('Lead added successfully:', data);
             setNewUrl('');
             fetchLeads();
         }
