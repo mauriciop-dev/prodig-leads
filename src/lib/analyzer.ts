@@ -1,74 +1,116 @@
 import * as cheerio from 'cheerio';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createClient } from '@supabase/supabase-js';
 
-// Initialize Gemini
-// Ensure GEMINI_API_KEY is in .env.local
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+// Supabase client initialization
+const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
-export interface LeadAnalysis {
-    techStack: string[];
-    opportunities: string[];
-    emailDraft: string;
-}
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-export async function analyzeUrl(url: string): Promise<LeadAnalysis> {
-    console.log(`Analyzing URL: ${url}`);
+/**
+ * Analyzes a lead's website using DeepSeek AI and saves the results to Supabase.
+ */
+export async function analyzeLead(url: string) {
+    // We check for DEEPSEEK_API_KEY, but fallback to GEMINI_API_KEY in case the user just swapped the value
+    const apiKey = process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY || '';
+    
+    console.log(`[Analyzer] Processing with DeepSeek: ${url}`);
+    
+    if (!apiKey) {
+        return { success: false, error: "API Key (DeepSeek/Gemini) is not configured in environment variables." };
+    }
 
     try {
-        // 1. Fetch the HTML
-        const response = await fetch(url);
-        const html = await response.text();
-        const $ = cheerio.load(html);
+        // 1. Scrape Website Content
+        let html = '';
+        try {
+            const response = await fetch(url, { 
+                signal: AbortSignal.timeout(10000),
+                headers: { 
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36' 
+                }
+            });
+            if (response.ok) html = await response.text();
+        } catch (fetchError) {
+            console.warn(`[Analyzer] Fetch error for ${url}:`, fetchError);
+        }
 
-        // 2. Extract basic info
-        const title = $('title').text();
-        const description = $('meta[name="description"]').attr('content') || '';
-        const h1s = $('h1').map((i, el) => $(el).text()).get().join('; ');
-        const bodyText = $('body').text().slice(0, 8000); // Larger context window for Gemini
+        const $ = cheerio.load(html || '<html></html>');
+        const title = $('title').text().trim() || url;
+        const metaDesc = $('meta[name="description"]').attr('content') || '';
+        const bodyText = $('body').text().substring(0, 4000).replace(/\s+/g, ' ');
 
-        // 3. Prompt
+        // 2. Prepare DeepSeek Prompt
         const prompt = `
-      You are an expert Sales Engineer for AIProdig (aiprodig.com).
-      AIProdig offers: Business Intelligence (Power BI), Enterprise Apps (Power Apps), Automation (n8n/Power Automate), and Local AI/Chatbots.
-      
-      Analyze this website context:
-      Title: ${title}
-      Description: ${description}
-      Headers: ${h1s}
-      Content Snippet: ${bodyText}
+            Analyze the following website for an AI/Automation Agency:
+            URL: ${url}
+            Title: ${title}
+            Description: ${metaDesc}
+            Content: ${bodyText}
+            
+            Return ONLY a valid JSON object in this format (nothing else):
+            {
+                "company_name": "Standardized company name",
+                "tech_stack": ["tech1", "tech2"],
+                "opportunities": ["AI opportunity 1", "AI opportunity 2"],
+                "hooks": ["Outreach hook"],
+                "email_draft": "Personalized cold email in Spanish"
+            }
+        `;
 
-      Task:
-      1. Identify Tech Stack.
-      2. Identify 2-3 Opportunities for AIProdig services.
-      3. Draft a cold email snippet (Subject + Body).
+        // 3. Call DeepSeek API (OpenAI Compatible)
+        console.log(`[Analyzer] Calling DeepSeek API...`);
+        const deepseekResponse = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+                model: "deepseek-chat",
+                messages: [
+                    { role: "system", content: "You are a professional business analyst. Output only valid JSON objects." },
+                    { role: "user", content: prompt }
+                ],
+                response_format: { type: "json_object" },
+                temperature: 0.7
+            })
+        });
 
-      Return ONLY valid JSON:
-      {
-        "techStack": ["Tool1"],
-        "opportunities": ["Opp1"],
-        "emailDraft": "Subject: ... Body: ..."
-      }
-    `;
+        if (!deepseekResponse.ok) {
+            const errorData = await deepseekResponse.json().catch(() => ({}));
+            throw new Error(`DeepSeek API Error: ${errorData.error?.message || deepseekResponse.statusText}`);
+        }
 
-        // 4. Call Gemini Flash (Fast & Cheap)
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash", generationConfig: { responseMimeType: "application/json" } });
-        const result = await model.generateContent(prompt);
-        const responseText = result.response.text();
+        const completion = await deepseekResponse.json();
+        const responseText = completion.choices[0].message.content;
+        const analysis = JSON.parse(responseText);
 
-        const data = JSON.parse(responseText);
+        // 4. Store in Supabase
+        console.log(`[Analyzer] Storing results for ${analysis.company_name}...`);
+        const { data, error: dbError } = await supabase
+            .from('leads')
+            .upsert({
+                url,
+                company_name: analysis.company_name || title,
+                status: 'analizado',
+                scraped_data: { title, description: metaDesc },
+                ai_analysis: analysis,
+                email_draft: analysis.email_draft,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'url' })
+            .select();
 
-        return {
-            techStack: data.techStack || [],
-            opportunities: data.opportunities || [],
-            emailDraft: data.emailDraft || "Could not generate draft.",
+        if (dbError) throw new Error(`Database Error: ${dbError.message}`);
+
+        return { 
+            success: true, 
+            lead: data?.[0],
+            message: "Lead successfully analyzed with DeepSeek."
         };
 
-    } catch (error) {
-        console.error("Analysis failed:", error);
-        return {
-            techStack: [],
-            opportunities: ["Error in analysis"],
-            emailDraft: "Error generating draft.",
-        };
+    } catch (error: any) {
+        console.error(`[Analyzer] Critical Error:`, error.message);
+        return { success: false, error: error.message };
     }
 }
