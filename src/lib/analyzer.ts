@@ -32,7 +32,6 @@ export async function analyzeLead(url: string) {
             if (response.ok) {
                 html = await response.text();
                 const $ = cheerio.load(html);
-                // Search for social links in the HTML
                 $('a[href]').each((_, el) => {
                     const href = $(el).attr('href') || '';
                     if (href.includes('linkedin.com/company') || href.includes('facebook.com') || href.includes('instagram.com')) {
@@ -49,9 +48,7 @@ export async function analyzeLead(url: string) {
         if (braveKey) {
             try {
                 const domain = new URL(url).hostname.replace('www.', '');
-                const query = `${domain} news projects achievements linkedin facebook`;
-                console.log(`[Analyzer] Searching Brave for: ${query}`);
-                
+                const query = `${domain} noticias proyectos logros recientes linkedin facebook`;
                 const searchRes = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`, {
                     headers: { 'Accept': 'application/json', 'X-Subscription-Token': braveKey }
                 });
@@ -69,9 +66,9 @@ export async function analyzeLead(url: string) {
         const title = $('title').text().trim() || url;
         const bodyContent = $('body').text().substring(0, 6000).replace(/\s+/g, ' ');
 
-        // 3. GROQ ANALYSIS WITH DEEP CONTEXT
+        // 3. GROQ ANALYSIS WITH IMPROVED 3-PARAGRAPH STRUCTURE
         const prompt = `
-            Eres Mauricio Pineda, consultor experto en IA de ProDig. Tu misión es redactar un correo de prospección ULTRA-PERSONALIZADO.
+            Eres Mauricio Pineda, consultor experto en IA de ProDig. Tu misión es redactar un correo de prospección extenso, estructurado y humano.
             
             FUENTES DE INVESTIGACIÓN:
             - Sitio Web: ${title} | ${url}
@@ -79,19 +76,27 @@ export async function analyzeLead(url: string) {
             - Contexto Externo (Noticias/Logros): ${externalContext}
             - Contenido Web Extraído: ${bodyContent}
 
-            INSTRUCCIONES DE CORREO (ESTILO N8N HUMANO):
-            1. PRIMER PÁRRAFO (CRÍTICO): Empieza elogiando un logro real, un proyecto reciente o un detalle específico que encontraste en la investigación (especialmente si viene del "Contexto Externo" o redes sociales). NO uses frases genéricas como "he revisado su web". Di algo como "Me encantó ver su reciente participación en..." o "Felicidades por el nuevo proyecto de vivienda en...".
-            2. CONEXIÓN: Conecta ese logro con una oportunidad técnica. Ejemplo: "Para soportar ese crecimiento, un asistente de IA especializado en [tema] podría...".
-            3. TONO: Mauricio Pineda, cercano, experto, cero "robot".
-            4. FORMATO: Texto plano. Sin encabezados Markdown (###). Sin negritas innecesarias.
+            ESTRUCTURA OBLIGATORIA DEL CORREO (3 PÁRRAFOS):
+            1. PÁRRAFO DE CONFIANZA: Debe ser una investigación real y extensa. Resalta un logro específico, un proyecto de vivienda destacado, una expansión reciente o un detalle técnico que encontraste en su web o noticias. El objetivo es que sientan que los conoces de verdad. No seas breve aquí, desarrolla el elogio con detalle.
+            
+            2. PÁRRAFO DE CONEXIÓN TÉCNICA: Conecta ese logro detectado con el potencial de la IA y la automatización. Explica cómo implementar soluciones (ej. agentes de atención técnica 24/7 o automatización de leads) no solo resolvería problemas actuales, sino que potenciaría que logren "muchos más éxitos como el que acaban de tener". Habla de escalabilidad y eficiencia comercial.
+            
+            3. PÁRRAFO DE INVITACIÓN: Una invitación cordial y profesional a una breve conversación de 15 minutos para explorar estas soluciones, sin compromiso. 
 
+            REGLAS CRÍTICAS:
+            - Usa un tono cálido, humano y consultivo.
+            - NO uses encabezados Markdown (###).
+            - NO uses negritas excesivas.
+            - El correo debe sentirse como una carta personal, no un reporte.
+            - Saludo: "Hola [Nombre o Equipo de Empresa]".
+            
             Devuelve UNICAMENTE un objeto JSON:
             {
               "company_name": "Nombre real",
               "tech_stack": ["tech1", "tech2"],
               "opportunities": ["oportunidad1", "oportunidad2"],
               "email_draft": "Cuerpo del correo (Español)",
-              "research_notes": "Breve resumen de qué lograste encontrar en redes o noticias"
+              "research_notes": "Resumen de lo que encontraste para personalizar el primer párrafo"
             }
         `;
 
@@ -102,7 +107,7 @@ export async function analyzeLead(url: string) {
                 model: "llama-3.3-70b-versatile",
                 messages: [{ role: "user", content: prompt }],
                 response_format: { type: "json_object" },
-                temperature: 0.8
+                temperature: 0.7
             })
         });
 
