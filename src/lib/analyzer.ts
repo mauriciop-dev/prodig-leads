@@ -8,53 +8,45 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABAS
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 /**
- * Analyzes a lead's website using DeepSeek AI and saves the results to Supabase.
+ * Analyzes a lead's website using Groq AI and saves the results to Supabase.
  */
 export async function analyzeLead(url: string) {
-    // We check for DEEPSEEK_API_KEY, but fallback to GEMINI_API_KEY in case the user just swapped the value
-    const apiKey = process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY || '';
+    // Look for GROQ_API_KEY first, then fallbacks in case the user reused old variables
+    const apiKey = process.env.GROQ_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY || '';
     
-    console.log(`[Analyzer] Start processing: ${url}`);
+    console.log(`[Analyzer] Start processing with Groq: ${url}`);
     
     if (!apiKey) {
-        return { success: false, error: "API Key (DeepSeek) is missing. Please add DEEPSEEK_API_KEY to your Vercel Environment Variables." };
+        return { success: false, error: "GROQ_API_KEY is missing. Please add it to your Vercel Environment Variables." };
     }
 
     try {
-        // 1. Scrape Website Content slowly and carefully
+        // 1. Scrape Website Content
         let html = '';
-        let scrapeSuccess = false;
-        
         try {
             console.log(`[Analyzer] Scraping ${url}...`);
             const response = await fetch(url, { 
-                signal: AbortSignal.timeout(15000), // Increased to 15s
+                signal: AbortSignal.timeout(15000),
                 headers: { 
                     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
                 }
             });
             
             if (response.ok) {
                 html = await response.text();
-                scrapeSuccess = true;
-                console.log(`[Analyzer] Successfully scraped ${html.length} bytes.`);
-            } else {
-                console.warn(`[Analyzer] Fetch failed with status ${response.status} for ${url}`);
             }
         } catch (fetchError: any) {
-            console.warn(`[Analyzer] Scraping error for ${url}: ${fetchError.message}`);
+            console.warn(`[Analyzer] Scraping warn for ${url}: ${fetchError.message}`);
         }
 
         const $ = cheerio.load(html || '<html></html>');
         const title = $('title').text().trim() || url;
         const metaDesc = $('meta[name="description"]').attr('content') || '';
-        // Extract links and headers to get more context even if body text is blocked
         const h1s = $('h1').map((i, el) => $(el).text()).get().join(' ');
         const bodyText = $('body').text().substring(0, 5000).replace(/\s+/g, ' ');
 
-        // 2. Prepare DeepSeek Prompt
+        // 2. Prepare Prompt
         const prompt = `
             Analyze the following website for an AI/Automation potential analysis.
             URL: ${url}
@@ -63,7 +55,8 @@ export async function analyzeLead(url: string) {
             Headings: ${h1s}
             Content Snippet: ${bodyText}
 
-            Provide a professional analysis in Spanish.
+            Provide a professional analysis in Spanish. 
+            Focus on identifying manual processes that can be improved with AI or automation.
             Return ONLY a valid JSON object with this structure:
             {
               "company_name": "Name of the company",
@@ -73,18 +66,18 @@ export async function analyzeLead(url: string) {
             }
         `;
 
-        // 3. Call DeepSeek
-        console.log(`[Analyzer] Requesting DeepSeek analysis...`);
-        const deepseekResponse = await fetch('https://api.deepseek.com/chat/completions', {
+        // 3. Call Groq (OpenAI Compatible API)
+        console.log(`[Analyzer] Requesting Groq analysis (llama-3.3-70b)...`);
+        const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-                model: "deepseek-chat",
+                model: "llama-3.3-70b-versatile",
                 messages: [
-                    { role: "system", content: "You are a professional business analyst specializing in AI and automation. You output only pure JSON." },
+                    { role: "system", content: "You are a professional business analyst specializing in AI. You output ONLY JSON." },
                     { role: "user", content: prompt }
                 ],
                 response_format: { type: "json_object" },
@@ -92,25 +85,18 @@ export async function analyzeLead(url: string) {
             })
         });
 
-        if (!deepseekResponse.ok) {
-            const errorText = await deepseekResponse.text();
-            console.error(`[Analyzer] DeepSeek API Error: ${deepseekResponse.status}`, errorText);
-            throw new Error(`AI Provider Error: ${deepseekResponse.statusText}`);
+        if (!groqResponse.ok) {
+            const errorText = await groqResponse.text();
+            console.error(`[Analyzer] Groq API Error: ${groqResponse.status}`, errorText);
+            throw new Error(`Groq API Error: ${groqResponse.statusText}`);
         }
 
-        const completion = await deepseekResponse.json();
+        const completion = await groqResponse.json();
         const responseText = completion.choices[0].message.content;
-        
-        let analysis;
-        try {
-            analysis = JSON.parse(responseText);
-        } catch (parseError) {
-            console.error('[Analyzer] Failed to parse AI response:', responseText);
-            throw new Error("The AI returned an invalid format.");
-        }
+        const analysis = JSON.parse(responseText);
 
         // 4. Update Supabase
-        console.log(`[Analyzer] Saving results for ${url}...`);
+        console.log(`[Analyzer] Saving Groq results for ${url}...`);
         const { data, error: dbError } = await supabase
             .from('leads')
             .update({
@@ -120,7 +106,7 @@ export async function analyzeLead(url: string) {
                     title, 
                     description: metaDesc, 
                     tech_stack: analysis.tech_stack || [],
-                    scraped_at: new Date().toISOString()
+                    provider: 'groq'
                 },
                 ai_analysis: analysis,
                 email_draft: analysis.email_draft,
@@ -129,10 +115,7 @@ export async function analyzeLead(url: string) {
             .eq('url', url)
             .select();
 
-        if (dbError) {
-            console.error('[Analyzer] Database Error:', dbError);
-            throw new Error(`Database Update Failed: ${dbError.message}`);
-        }
+        if (dbError) throw new Error(`Database Error: ${dbError.message}`);
 
         return { 
             success: true, 
