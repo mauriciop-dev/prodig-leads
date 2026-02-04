@@ -8,94 +8,108 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABAS
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 /**
- * Analyzes a lead's website using Groq AI and saves the results to Supabase.
+ * Analyzes a lead's website using Groq AI plus external search for deep personalization.
  */
 export async function analyzeLead(url: string) {
-    const apiKey = process.env.GROQ_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY || '';
+    const groqKey = process.env.GROQ_API_KEY || '';
+    const braveKey = process.env.BRAVE_API_KEY || '';
     
-    console.log(`[Analyzer] Start processing with Groq: ${url}`);
+    console.log(`[Analyzer] Deep Research started for: ${url}`);
     
-    if (!apiKey) {
-        return { success: false, error: "GROQ_API_KEY is missing. Please add it to your Vercel Environment Variables." };
+    if (!groqKey) {
+        return { success: false, error: "GROQ_API_KEY is missing." };
     }
 
     try {
-        // 1. Scrape Website Content
+        // 1. SCALING WEB SCRAPING: Get Main Page + Look for Social Links
         let html = '';
+        let socialLinks: string[] = [];
         try {
             const response = await fetch(url, { 
                 signal: AbortSignal.timeout(15000),
-                headers: { 
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
-                }
+                headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' }
             });
-            
             if (response.ok) {
                 html = await response.text();
+                const $ = cheerio.load(html);
+                // Search for social links in the HTML
+                $('a[href]').each((_, el) => {
+                    const href = $(el).attr('href') || '';
+                    if (href.includes('linkedin.com/company') || href.includes('facebook.com') || href.includes('instagram.com')) {
+                        socialLinks.push(href);
+                    }
+                });
             }
-        } catch (fetchError: any) {
-            console.warn(`[Analyzer] Scraping warn for ${url}: ${fetchError.message}`);
+        } catch (e) {
+            console.warn(`[Analyzer] Primary scrape failed:`, e);
+        }
+
+        // 2. EXTERNAL SEARCH: Search for recent news and info (Brave Search)
+        let externalContext = "";
+        if (braveKey) {
+            try {
+                const domain = new URL(url).hostname.replace('www.', '');
+                const query = `${domain} news projects achievements linkedin facebook`;
+                console.log(`[Analyzer] Searching Brave for: ${query}`);
+                
+                const searchRes = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`, {
+                    headers: { 'Accept': 'application/json', 'X-Subscription-Token': braveKey }
+                });
+                
+                if (searchRes.ok) {
+                    const searchData = await searchRes.json();
+                    externalContext = searchData.web?.results?.map((r: any) => `${r.title}: ${r.description}`).join("\n") || "";
+                }
+            } catch (e) {
+                console.warn(`[Analyzer] External search failed:`, e);
+            }
         }
 
         const $ = cheerio.load(html || '<html></html>');
         const title = $('title').text().trim() || url;
-        const metaDesc = $('meta[name="description"]').attr('content') || '';
-        const h1s = $('h1').map((i, el) => $(el).text()).get().join(' ');
-        const bodyText = $('body').text().substring(0, 5000).replace(/\s+/g, ' ');
+        const bodyContent = $('body').text().substring(0, 6000).replace(/\s+/g, ' ');
 
-        // 2. Prepare Prompt (Improved to match User's n8n style)
+        // 3. GROQ ANALYSIS WITH DEEP CONTEXT
         const prompt = `
-            Actúa como Mauricio Pineda, consultor experto en IA de ProDig. 
-            Analiza el sitio web para identificar procesos manuales que puedan ser mejorados con IA (chatbots, automatización, visión artificial, etc.).
+            Eres Mauricio Pineda, consultor experto en IA de ProDig. Tu misión es redactar un correo de prospección ULTRA-PERSONALIZADO.
+            
+            FUENTES DE INVESTIGACIÓN:
+            - Sitio Web: ${title} | ${url}
+            - Redes detectadas: ${socialLinks.join(', ')}
+            - Contexto Externo (Noticias/Logros): ${externalContext}
+            - Contenido Web Extraído: ${bodyContent}
 
-            DATOS DEL SITIO:
-            URL: ${url}
-            Título: ${title}
-            Descripción: ${metaDesc}
-            Encabezados: ${h1s}
-            Contenido: ${bodyText}
+            INSTRUCCIONES DE CORREO (ESTILO N8N HUMANO):
+            1. PRIMER PÁRRAFO (CRÍTICO): Empieza elogiando un logro real, un proyecto reciente o un detalle específico que encontraste en la investigación (especialmente si viene del "Contexto Externo" o redes sociales). NO uses frases genéricas como "he revisado su web". Di algo como "Me encantó ver su reciente participación en..." o "Felicidades por el nuevo proyecto de vivienda en...".
+            2. CONEXIÓN: Conecta ese logro con una oportunidad técnica. Ejemplo: "Para soportar ese crecimiento, un asistente de IA especializado en [tema] podría...".
+            3. TONO: Mauricio Pineda, cercano, experto, cero "robot".
+            4. FORMATO: Texto plano. Sin encabezados Markdown (###). Sin negritas innecesarias.
 
-            INSTRUCCIONES PARA EL CORREO:
-            1. Tono: Cálido, profesional, humano y consultivo.
-            2. Estructura: 
-               - Gancho personalizado: Menciona algo específico del negocio basado en los datos proporcionados.
-               - Valor: Explica brevemente cómo la IA (ej. un chatbot entrenado con su información técnica) puede resolver un problema específico que detectaste.
-               - CTA: Pide agendar una llamada de 15 minutos para mostrar ejemplos.
-            3. REGLA CRÍTICA: NO uses encabezados de Markdown (###) ni un formato de "reporte". El correo debe fluir como un mensaje directo y personal. NO uses "Estimado equipo", usa "Estimados amigos de [Nombre Empresa]" o un saludo profesional similar.
-
-            Devuelve UNICAMENTE un objeto JSON válido con esta estructura:
+            Devuelve UNICAMENTE un objeto JSON:
             {
-              "company_name": "Nombre real de la empresa",
-              "tech_stack": ["tecnología detectada 1", "2"],
-              "opportunities": ["oportunidad específica 1", "2"],
-              "email_draft": "Cuerpo del correo listo para copiar y pegar (en Español)"
+              "company_name": "Nombre real",
+              "tech_stack": ["tech1", "tech2"],
+              "opportunities": ["oportunidad1", "oportunidad2"],
+              "email_draft": "Cuerpo del correo (Español)",
+              "research_notes": "Breve resumen de qué lograste encontrar en redes o noticias"
             }
         `;
 
-        // 3. Call Groq
         const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-            },
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
             body: JSON.stringify({
                 model: "llama-3.3-70b-versatile",
-                messages: [
-                    { role: "system", content: "Eres un analista de negocios experto. Solo respondes en formato JSON puro." },
-                    { role: "user", content: prompt }
-                ],
+                messages: [{ role: "user", content: prompt }],
                 response_format: { type: "json_object" },
-                temperature: 0.7
+                temperature: 0.8
             })
         });
 
-        if (!groqResponse.ok) throw new Error(`Groq API Error: ${groqResponse.statusText}`);
+        if (!groqResponse.ok) throw new Error("Groq analysis failed");
 
         const completion = await groqResponse.json();
-        const responseText = completion.choices[0].message.content;
-        const analysis = JSON.parse(responseText);
+        const analysis = JSON.parse(completion.choices[0].message.content);
 
         // 4. Update Supabase
         const { data, error: dbError } = await supabase
@@ -103,14 +117,13 @@ export async function analyzeLead(url: string) {
             .update({
                 company_name: analysis.company_name || title,
                 status: 'analizado',
-                scraped_data: { 
-                    title, 
-                    description: metaDesc, 
-                    tech_stack: analysis.tech_stack || [],
-                    provider: 'groq'
-                },
                 ai_analysis: analysis,
                 email_draft: analysis.email_draft,
+                scraped_data: { 
+                    social_links: socialLinks, 
+                    research_found: analysis.research_notes,
+                    external_context: externalContext.substring(0, 500)
+                },
                 updated_at: new Date().toISOString()
             })
             .eq('url', url)
