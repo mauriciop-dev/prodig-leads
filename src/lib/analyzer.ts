@@ -11,7 +11,6 @@ const supabase = createClient(supabaseUrl, supabaseKey);
  * Analyzes a lead's website using Groq AI and saves the results to Supabase.
  */
 export async function analyzeLead(url: string) {
-    // Look for GROQ_API_KEY first, then fallbacks in case the user reused old variables
     const apiKey = process.env.GROQ_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY || '';
     
     console.log(`[Analyzer] Start processing with Groq: ${url}`);
@@ -24,7 +23,6 @@ export async function analyzeLead(url: string) {
         // 1. Scrape Website Content
         let html = '';
         try {
-            console.log(`[Analyzer] Scraping ${url}...`);
             const response = await fetch(url, { 
                 signal: AbortSignal.timeout(15000),
                 headers: { 
@@ -46,28 +44,36 @@ export async function analyzeLead(url: string) {
         const h1s = $('h1').map((i, el) => $(el).text()).get().join(' ');
         const bodyText = $('body').text().substring(0, 5000).replace(/\s+/g, ' ');
 
-        // 2. Prepare Prompt
+        // 2. Prepare Prompt (Improved to match User's n8n style)
         const prompt = `
-            Analyze the following website for an AI/Automation potential analysis.
-            URL: ${url}
-            Title: ${title}
-            Description: ${metaDesc}
-            Headings: ${h1s}
-            Content Snippet: ${bodyText}
+            Actúa como Mauricio Pineda, consultor experto en IA de ProDig. 
+            Analiza el sitio web para identificar procesos manuales que puedan ser mejorados con IA (chatbots, automatización, visión artificial, etc.).
 
-            Provide a professional analysis in Spanish. 
-            Focus on identifying manual processes that can be improved with AI or automation.
-            Return ONLY a valid JSON object with this structure:
+            DATOS DEL SITIO:
+            URL: ${url}
+            Título: ${title}
+            Descripción: ${metaDesc}
+            Encabezados: ${h1s}
+            Contenido: ${bodyText}
+
+            INSTRUCCIONES PARA EL CORREO:
+            1. Tono: Cálido, profesional, humano y consultivo.
+            2. Estructura: 
+               - Gancho personalizado: Menciona algo específico del negocio basado en los datos proporcionados.
+               - Valor: Explica brevemente cómo la IA (ej. un chatbot entrenado con su información técnica) puede resolver un problema específico que detectaste.
+               - CTA: Pide agendar una llamada de 15 minutos para mostrar ejemplos.
+            3. REGLA CRÍTICA: NO uses encabezados de Markdown (###) ni un formato de "reporte". El correo debe fluir como un mensaje directo y personal. NO uses "Estimado equipo", usa "Estimados amigos de [Nombre Empresa]" o un saludo profesional similar.
+
+            Devuelve UNICAMENTE un objeto JSON válido con esta estructura:
             {
-              "company_name": "Name of the company",
-              "tech_stack": ["detected tech 1", "tech 2"],
-              "opportunities": ["opportunity 1 in Spanish", "opportunity 2 in Spanish"],
-              "email_draft": "A professional and personalized outreach email in Spanish (Markdown formatted)"
+              "company_name": "Nombre real de la empresa",
+              "tech_stack": ["tecnología detectada 1", "2"],
+              "opportunities": ["oportunidad específica 1", "2"],
+              "email_draft": "Cuerpo del correo listo para copiar y pegar (en Español)"
             }
         `;
 
-        // 3. Call Groq (OpenAI Compatible API)
-        console.log(`[Analyzer] Requesting Groq analysis (llama-3.3-70b)...`);
+        // 3. Call Groq
         const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
@@ -77,7 +83,7 @@ export async function analyzeLead(url: string) {
             body: JSON.stringify({
                 model: "llama-3.3-70b-versatile",
                 messages: [
-                    { role: "system", content: "You are a professional business analyst specializing in AI. You output ONLY JSON." },
+                    { role: "system", content: "Eres un analista de negocios experto. Solo respondes en formato JSON puro." },
                     { role: "user", content: prompt }
                 ],
                 response_format: { type: "json_object" },
@@ -85,18 +91,13 @@ export async function analyzeLead(url: string) {
             })
         });
 
-        if (!groqResponse.ok) {
-            const errorText = await groqResponse.text();
-            console.error(`[Analyzer] Groq API Error: ${groqResponse.status}`, errorText);
-            throw new Error(`Groq API Error: ${groqResponse.statusText}`);
-        }
+        if (!groqResponse.ok) throw new Error(`Groq API Error: ${groqResponse.statusText}`);
 
         const completion = await groqResponse.json();
         const responseText = completion.choices[0].message.content;
         const analysis = JSON.parse(responseText);
 
         // 4. Update Supabase
-        console.log(`[Analyzer] Saving Groq results for ${url}...`);
         const { data, error: dbError } = await supabase
             .from('leads')
             .update({
@@ -117,14 +118,10 @@ export async function analyzeLead(url: string) {
 
         if (dbError) throw new Error(`Database Error: ${dbError.message}`);
 
-        return { 
-            success: true, 
-            lead: data?.[0],
-            message: "Success"
-        };
+        return { success: true, lead: data?.[0] };
 
     } catch (error: any) {
-        console.error(`[Analyzer] Critical Failure:`, error.message);
+        console.error(`[Analyzer] Failure:`, error.message);
         return { success: false, error: error.message };
     }
 }
